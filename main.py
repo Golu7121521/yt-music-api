@@ -1,79 +1,45 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from ytmusicapi import YTMusic
-import yt_dlp
+import requests
 
-app = FastAPI(title="YT Music Custom API")
+app = FastAPI(title="JioSaavn Light API")
 
-# Add CORS Middleware to allow requests from the browser
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allow all methods
-    allow_headers=["*"],  # Allow all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-
-ytmusic = YTMusic()
 
 @app.get("/")
 def home():
-    return {"message": "Welcome to Custom YT Music API! Server is running."}
+    return {"message": "JioSaavn API is live and running smoothly!"}
 
-# 1. Search & Get Stream URL (Gaana play karne ke liye)
-@app.get("/play")
-def play_song(query: str):
+# 1. Search Songs
+@app.get("/search")
+def search_songs(query: str):
     try:
-        search_results = ytmusic.search(query, filter="songs")
-        if not search_results:
-            raise HTTPException(status_code=404, detail="Song not found")
+        url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&q={query}&_format=json&_marker=0&api_version=4&n=10"
+        response = requests.get(url)
+        data = response.json()
+        
+        songs = data.get("results", [])
+        formatted_songs = []
+        
+        for song in songs:
+            # JioSaavn songs data clean formatting
+            formatted_songs.endswith # wait, let's just append
+            formatted_songs.append({
+                "id": song.get("id"),
+                "title": song.get("title"),
+                "artist": song.get("more_info", {}).get("singers"),
+                "album": song.get("more_info", {}).get("album"),
+                "duration": song.get("more_info", {}).get("duration"),
+                "image": song.get("image", "").replace("150x150", "500x500"),
+                "stream_url": song.get("more_info", {}).get("encrypted_media_url")
+            })
             
-        top_song = search_results[0]
-        video_id = top_song['videoId']
-        
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'quiet': True,
-            'noplaylist': True
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            video_url = f"https://www.youtube.com/watch?v={video_id}"
-            info_dict = ydl.extract_info(video_url, download=False)
-            stream_url = info_dict.get('url', None)
-
-        return {
-            "status": "success",
-            "title": top_song.get('title'),
-            "artist": top_song['artists'][0]['name'] if top_song.get('artists') else "Unknown",
-            "video_id": video_id,
-            "thumbnail": top_song.get('thumbnails', [{}])[-1].get('url', ''),
-            "stream_url": stream_url
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# 2. Charts Endpoint (Trending Now ke liye)
-@app.get("/charts")
-def get_charts(country: str = "IN"):
-    try:
-        charts_data = ytmusic.get_charts(country=country)
-        return {
-            "status": "success",
-            "trending_videos": charts_data.get("videos", {}).get("items", []),
-            "top_songs": charts_data.get("tracks", {}).get("items", [])
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# 3. Home Recommendations Endpoint (Home Tab ke liye)
-@app.get("/home")
-def get_home():
-    try:
-        home_feed = ytmusic.get_home(limit=5)
-        return {
-            "status": "success",
-            "feed": home_feed
-        }
+        return {"status": "success", "results": formatted_songs}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

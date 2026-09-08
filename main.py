@@ -4,7 +4,7 @@ import requests
 import base64
 from pyDes import des, ECB, PAD_PKCS5
 
-app = FastAPI(title="JioSaavn Pure Vibe Radio API")
+app = FastAPI(title="JioSaavn Authentic Radio API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -49,21 +49,19 @@ def format_song_item(item):
         "artist": more_info.get("singers") or item.get("primary_artists") or item.get("subtitle") or "Unknown",
         "album": more_info.get("album"),
         "year": item.get("year") or more_info.get("year") or "",
-        "language": item.get("language") or more_info.get("language") or "hindi",
-        "duration": more_info.get("duration"),
         "image": (item.get("image") or "").replace("150x150", "500x500"),
         "stream_url": playable_url
     }
 
 @app.get("/")
 def home():
-    return {"message": "Vibe API is running smoothly!"}
+    return {"message": "Radio API is online"}
 
 # 1. Search Songs
 @app.get("/search")
-def search_songs(query: str, page: int = 1):
+def search_songs(query: str):
     try:
-        url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&q={query}&_format=json&_marker=0&api_version=4&p={page}&n=25"
+        url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&q={query}&_format=json&_marker=0&api_version=4&n=25"
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers)
         data = response.json()
@@ -105,24 +103,37 @@ def get_lyrics(song_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# 4. Same Vibe Radio (Strict Genre / Era Lock)
+# 4. Authentic Entity Radio (Zero random/bhakti contamination)
 @app.get("/radio")
-def get_vibe_radio(vibe: str, page: int = 1):
+def get_station_radio(song_id: str, station_id: str = ""):
     headers = {"User-Agent": "Mozilla/5.0"}
     formatted = []
     
     try:
-        # User ki current vibe (jaise "90s hindi hit songs") ko target karke endless pagination
-        url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&q={vibe}&_format=json&_marker=0&api_version=4&p={page}&n=25"
-        res = requests.get(url, headers=headers)
-        data = res.json()
-        songs = data.get("results", []) if isinstance(data, dict) else []
-        
-        for s in songs:
-            item = format_song_item(s)
-            if item:
-                formatted.append(item)
-    except Exception:
-        pass
+        # Step A: Agar station_id nahi hai, toh pehle JioSaavn se authentic radio station banwao
+        if not station_id:
+            st_url = f'https://www.jiosaavn.com/api.php?__call=webradio.createEntityStation&entity_id=["{song_id}"]&entity_type=queue&_format=json&_marker=0&api_version=4'
+            st_res = requests.get(st_url, headers=headers).json()
+            station_id = st_res.get("stationid")
 
-    return {"status": "success", "results": formatted}
+        # Step B: Station se exact vibe wale continuous tracks fetch karo
+        if station_id:
+            song_url = f"https://www.jiosaavn.com/api.php?__call=webradio.getSong&stationid={station_id}&k=20&_format=json&_marker=0&api_version=4"
+            song_res = requests.get(song_url, headers=headers).json()
+            
+            raw_items = song_res.values() if isinstance(song_res, dict) else song_res
+            for item in raw_items:
+                if isinstance(item, dict):
+                    # Direct song ya nested song object
+                    song_obj = item.get("song") if "song" in item and isinstance(item["song"], dict) else item
+                    formatted_item = format_song_item(song_obj)
+                    if formatted_item:
+                        formatted.append(formatted_item)
+
+        return {
+            "status": "success", 
+            "station_id": station_id, 
+            "results": formatted
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

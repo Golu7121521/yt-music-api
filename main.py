@@ -29,7 +29,7 @@ def decrypt_url(encrypted_url):
 
 @app.get("/")
 def home():
-    return {"message": "JioSaavn Full API is live and running!"}
+    return {"message": "JioSaavn Full API is live and running smoothly!"}
 
 # 1. Search Songs
 @app.get("/search")
@@ -66,16 +66,14 @@ def search_songs(query: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# 2. Home Tab Feed (Trending, New Releases, Charts, etc.)
+# 2. Home Tab Feed (Trending, New Releases, Playlists)
 @app.get("/home-feed")
 def get_home_feed():
     try:
-        # JioSaavn Home webapi endpoint
         url = "https://www.jiosaavn.com/api.php?__call=webapi.get&token=home&type=playlist&_format=json&_marker=0&api_version=4"
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers)
         data = response.json()
-        
         return {"status": "success", "data": data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -91,5 +89,44 @@ def get_lyrics(song_id: str):
         
         lyrics_text = data.get("lyrics", "Lyrics not available.")
         return {"status": "success", "lyrics": lyrics_text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# 4. Get Radio / Similar Songs Queue for Auto-Play
+@app.get("/radio")
+def get_song_radio(song_id: str):
+    try:
+        station_url = f"https://www.jiosaavn.com/api.php?__call=webradio.createStation&entity_id={song_id}&entity_type=song&_format=json&_marker=0&api_version=4"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get(station_url, headers=headers)
+        station_data = res.json()
+        
+        station_id = station_data.get("stationid")
+        if not station_id:
+            return {"status": "error", "message": "Could not create radio station"}
+            
+        songs_url = f"https://www.jiosaavn.com/api.php?__call=webradio.getSong&stationid={station_id}&k=20&_format=json&_marker=0&api_version=4"
+        songs_res = requests.get(songs_url, headers=headers)
+        songs_data = songs_res.json()
+        
+        formatted_songs = []
+        items = songs_data.values() if isinstance(songs_data, dict) else songs_data
+        
+        for item in items:
+            if isinstance(item, dict):
+                more_info = item.get("more_info", {})
+                enc_url = more_info.get("encrypted_media_url")
+                playable_url = decrypt_url(enc_url)
+                
+                if playable_url:
+                    formatted_songs.append({
+                        "id": item.get("id"),
+                        "title": item.get("title") or item.get("song"),
+                        "artist": more_info.get("singers") or item.get("subtitle"),
+                        "image": (item.get("image") or "").replace("150x150", "500x500"),
+                        "stream_url": playable_url
+                    })
+                    
+        return {"status": "success", "results": formatted_songs}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

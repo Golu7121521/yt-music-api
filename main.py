@@ -4,7 +4,7 @@ import requests
 import base64
 from pyDes import des, ECB, PAD_PKCS5
 
-app = FastAPI(title="JioSaavn Authentic Radio API")
+app = FastAPI(title="Spotify-Style Recommendation API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -48,92 +48,100 @@ def format_song_item(item):
         "title": item.get("title") or item.get("song"),
         "artist": more_info.get("singers") or item.get("primary_artists") or item.get("subtitle") or "Unknown",
         "album": more_info.get("album"),
-        "year": item.get("year") or more_info.get("year") or "",
+        "year": str(item.get("year") or more_info.get("year") or ""),
+        "language": (item.get("language") or more_info.get("language") or "hindi").lower(),
         "image": (item.get("image") or "").replace("150x150", "500x500"),
         "stream_url": playable_url
     }
 
 @app.get("/")
 def home():
-    return {"message": "Radio API is online"}
+    return {"message": "Recommendation Engine Live"}
 
-# 1. Search Songs
 @app.get("/search")
-def search_songs(query: str):
+def search_songs(query: str, page: int = 1):
     try:
-        url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&q={query}&_format=json&_marker=0&api_version=4&n=25"
+        url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&q={query}&_format=json&_marker=0&api_version=4&p={page}&n=25"
         headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers)
-        data = response.json()
+        response = requests.get(url, headers=headers).json()
         
-        songs = []
-        if isinstance(data, dict):
-            songs = data.get("results", []) or data.get("data", [])
-        
-        formatted = []
-        for s in songs:
-            item = format_song_item(s)
-            if item:
-                formatted.append(item)
-            
+        songs = response.get("results", []) if isinstance(response, dict) else []
+        formatted = [format_song_item(s) for s in songs if format_song_item(s)]
         return {"status": "success", "results": formatted}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# 2. Home Feed
 @app.get("/home-feed")
 def get_home_feed():
     try:
         url = "https://www.jiosaavn.com/api.php?__call=webapi.getLaunchData&api_version=4&_format=json&_marker=0"
         headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers)
-        return {"status": "success", "data": response.json()}
+        response = requests.get(url, headers=headers).json()
+        return {"status": "success", "data": response}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# 3. Lyrics
 @app.get("/lyrics")
 def get_lyrics(song_id: str):
     try:
         url = f"https://www.jiosaavn.com/api.php?__call=lyrics.getLyrics&lyrics_id={song_id}&_format=json&_marker=0&api_version=4"
         headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers)
-        data = response.json()
+        data = requests.get(url, headers=headers).json()
         return {"status": "success", "lyrics": data.get("lyrics", "Lyrics not available.")}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# 4. Authentic Entity Radio (Zero random/bhakti contamination)
-@app.get("/radio")
-def get_station_radio(song_id: str, station_id: str = ""):
+# Smart Vibe Matching (Filtering out irrelevant/genre-leaking songs)
+@app.get("/smart-radio")
+def smart_vibe_radio(song_id: str, artist: str = "", era_decade: str = "", page: int = 1):
     headers = {"User-Agent": "Mozilla/5.0"}
-    formatted = []
+    raw_candidates = []
     
+    # Layer 1: Specific Song Entity Radio
     try:
-        # Step A: Agar station_id nahi hai, toh pehle JioSaavn se authentic radio station banwao
-        if not station_id:
-            st_url = f'https://www.jiosaavn.com/api.php?__call=webradio.createEntityStation&entity_id=["{song_id}"]&entity_type=queue&_format=json&_marker=0&api_version=4'
-            st_res = requests.get(st_url, headers=headers).json()
-            station_id = st_res.get("stationid")
+        url = f"https://www.jiosaavn.com/api.php?__call=reco.getreco&api_version=4&_format=json&_marker=0&pid={song_id}"
+        data = requests.get(url, headers=headers).json()
+        items = data if isinstance(data, list) else data.get("songs", [])
+        for s in items:
+            it = format_song_item(s)
+            if it: raw_candidates.append(it)
+    except Exception:
+        pass
 
-        # Step B: Station se exact vibe wale continuous tracks fetch karo
-        if station_id:
-            song_url = f"https://www.jiosaavn.com/api.php?__call=webradio.getSong&stationid={station_id}&k=20&_format=json&_marker=0&api_version=4"
-            song_res = requests.get(song_url, headers=headers).json()
+    # Layer 2: Targeted Era/Artist Query Fallback
+    if len(raw_candidates) < 10 and artist:
+        try:
+            target_query = f"{artist.split(',')[0].strip()} {era_decade} hits".strip()
+            url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&q={target_query}&_format=json&_marker=0&api_version=4&p={page}&n=25"
+            res = requests.get(url, headers=headers).json()
+            items = res.get("results", []) if isinstance(res, dict) else []
+            for s in items:
+                it = format_song_item(s)
+                if it: raw_candidates.append(it)
+        except Exception:
+            pass
+
+    # Layer 3: Heuristic Filtering (Blocking Bhakti / Devotional / Era Mismatch)
+    blacklist_keywords = ["aarti", "bhajan", "chalisa", "mantra", "katha", "devotional", "shri", "krishna", "ram", "hanuman"]
+    filtered_results = []
+    
+    for song in raw_candidates:
+        title_lower = song["title"].lower()
+        
+        # Drop devotional contamination unless user explicitly plays bhakti
+        if any(w in title_lower for w in blacklist_keywords):
+            continue
             
-            raw_items = song_res.values() if isinstance(song_res, dict) else song_res
-            for item in raw_items:
-                if isinstance(item, dict):
-                    # Direct song ya nested song object
-                    song_obj = item.get("song") if "song" in item and isinstance(item["song"], dict) else item
-                    formatted_item = format_song_item(song_obj)
-                    if formatted_item:
-                        formatted.append(formatted_item)
+        # Era check (e.g. If 90s, keep 1988-2002 range)
+        if era_decade == "90s" and song["year"]:
+            try:
+                y = int(song["year"])
+                if y < 1988 or y > 2002:
+                    continue
+            except ValueError:
+                pass
+                
+        if not any(f["id"] == song["id"] for f in filtered_results):
+            filtered_results.append(song)
 
-        return {
-            "status": "success", 
-            "station_id": station_id, 
-            "results": formatted
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return {"status": "success", "results": filtered_results}

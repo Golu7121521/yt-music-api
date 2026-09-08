@@ -4,9 +4,8 @@ import requests
 import base64
 from pyDes import des, ECB, PAD_PKCS5
 
-app = FastAPI(title="JioSaavn Context Radio API")
+app = FastAPI(title="JioSaavn Pure Vibe Radio API")
 
-# Enable CORS for all origins to allow browser requests
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,11 +23,9 @@ def decrypt_url(encrypted_url):
         k = des(secret_key, ECB, iv, pad=None, padmode=PAD_PKCS5)
         decrypted_url = k.decrypt(base64.b64decode(encrypted_url)).decode('utf-8')
         
-        # Ensure secure HTTPS protocol
         if decrypted_url.startswith("http://"):
             decrypted_url = decrypted_url.replace("http://", "https://", 1)
             
-        # Standard reliable quality (160kbps/mp4)
         if "_96.mp4" in decrypted_url:
             decrypted_url = decrypted_url.replace("_96.mp4", "_160.mp4")
             
@@ -51,6 +48,8 @@ def format_song_item(item):
         "title": item.get("title") or item.get("song"),
         "artist": more_info.get("singers") or item.get("primary_artists") or item.get("subtitle") or "Unknown",
         "album": more_info.get("album"),
+        "year": item.get("year") or more_info.get("year") or "",
+        "language": item.get("language") or more_info.get("language") or "hindi",
         "duration": more_info.get("duration"),
         "image": (item.get("image") or "").replace("150x150", "500x500"),
         "stream_url": playable_url
@@ -58,9 +57,9 @@ def format_song_item(item):
 
 @app.get("/")
 def home():
-    return {"message": "Context Radio API is live"}
+    return {"message": "Vibe API is running smoothly!"}
 
-# 1. Search Songs with Pagination
+# 1. Search Songs
 @app.get("/search")
 def search_songs(query: str, page: int = 1):
     try:
@@ -83,7 +82,7 @@ def search_songs(query: str, page: int = 1):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# 2. Home Tab Feed
+# 2. Home Feed
 @app.get("/home-feed")
 def get_home_feed():
     try:
@@ -94,7 +93,7 @@ def get_home_feed():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# 3. Lyrics Endpoint
+# 3. Lyrics
 @app.get("/lyrics")
 def get_lyrics(song_id: str):
     try:
@@ -106,37 +105,24 @@ def get_lyrics(song_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# 4. Vibe-Locked Continuous Radio (Keeps the same era/category)
+# 4. Same Vibe Radio (Strict Genre / Era Lock)
 @app.get("/radio")
-def get_same_vibe_radio(song_id: str, vibe_query: str = "", page: int = 1):
+def get_vibe_radio(vibe: str, page: int = 1):
     headers = {"User-Agent": "Mozilla/5.0"}
     formatted = []
     
-    # Priority 1: Agar vibe_query (jaise '90s songs') mila hai, usi category ke agle batch se songs fetch karo
-    if vibe_query:
-        try:
-            url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&q={vibe_query}&_format=json&_marker=0&api_version=4&p={page}&n=25"
-            res = requests.get(url, headers=headers)
-            songs = res.json().get("results", [])
-            for s in songs:
-                item = format_song_item(s)
-                if item:
-                    formatted.append(item)
-        except Exception:
-            pass
-
-    # Priority 2: Song specific recommendations fallback
-    if len(formatted) < 5:
-        try:
-            url = f"https://www.jiosaavn.com/api.php?__call=reco.getreco&api_version=4&_format=json&_marker=0&pid={song_id}"
-            res = requests.get(url, headers=headers)
-            data = res.json()
-            raw_songs = data if isinstance(data, list) else data.get("songs", [])
-            for s in raw_songs:
-                item = format_song_item(s)
-                if item and not any(f["id"] == item["id"] for f in formatted):
-                    formatted.append(item)
-        except Exception:
-            pass
+    try:
+        # User ki current vibe (jaise "90s hindi hit songs") ko target karke endless pagination
+        url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&q={vibe}&_format=json&_marker=0&api_version=4&p={page}&n=25"
+        res = requests.get(url, headers=headers)
+        data = res.json()
+        songs = data.get("results", []) if isinstance(data, dict) else []
+        
+        for s in songs:
+            item = format_song_item(s)
+            if item:
+                formatted.append(item)
+    except Exception:
+        pass
 
     return {"status": "success", "results": formatted}

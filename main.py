@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import requests
 import base64
-from pyDes import des, ECB, PAD_PKCS5, padding
+from pyDes import des, ECB, PAD_PKCS5
 
 app = FastAPI(title="JioSaavn Light API")
 
@@ -18,15 +18,11 @@ def decrypt_url(encrypted_url):
     if not encrypted_url:
         return ""
     try:
-        # JioSaavn decryption key
         secret_key = b"38346591"
         iv = b""
         k = des(secret_key, ECB, iv, pad=None, padmode=PAD_PKCS5)
         
-        # Base64 decode and decrypt
         decrypted_url = k.decrypt(base64.b64decode(encrypted_url)).decode('utf-8')
-        
-        # Convert low quality to high quality (320kbps) if available
         decrypted_url = decrypted_url.replace("_96.mp4", "_320.mp4")
         return decrypted_url
     except Exception:
@@ -56,7 +52,6 @@ def search_songs(query: str):
             more_info = song.get("more_info", {})
             enc_url = more_info.get("encrypted_media_url")
             
-            # Decrypting the URL so it becomes playable in HTML audio tag
             playable_url = decrypt_url(enc_url)
             
             formatted_songs.append({

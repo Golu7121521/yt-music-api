@@ -4,8 +4,9 @@ import requests
 import base64
 from pyDes import des, ECB, PAD_PKCS5
 
-app = FastAPI(title="JioSaavn Full Featured API")
+app = FastAPI(title="JioSaavn Full API")
 
+# CORS middleware taaki kisi bhi browser/origin se request block na ho
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,7 +23,15 @@ def decrypt_url(encrypted_url):
         iv = b""
         k = des(secret_key, ECB, iv, pad=None, padmode=PAD_PKCS5)
         decrypted_url = k.decrypt(base64.b64decode(encrypted_url)).decode('utf-8')
-        decrypted_url = decrypted_url.replace("_96.mp4", "_320.mp4")
+        
+        # Browser security ke liye https zaroori hai
+        if decrypted_url.startswith("http://"):
+            decrypted_url = decrypted_url.replace("http://", "https://", 1)
+            
+        # 160kbps sabhi gaano par available aur bina buffering chalta hai
+        if "_96.mp4" in decrypted_url:
+            decrypted_url = decrypted_url.replace("_96.mp4", "_160.mp4")
+            
         return decrypted_url
     except Exception:
         return ""
@@ -47,9 +56,9 @@ def format_song_item(item):
 
 @app.get("/")
 def home():
-    return {"message": "JioSaavn API is running!"}
+    return {"message": "JioSaavn API is running smoothly!"}
 
-# 1. Search Songs (Page wise for infinite search)
+# 1. Search Songs
 @app.get("/search")
 def search_songs(query: str, page: int = 1):
     try:
@@ -95,7 +104,7 @@ def get_lyrics(song_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# 4. Unlimited Recommendations / Similar Songs (100% Working reco.getreco)
+# 4. Unlimited Recommendations / Similar Songs
 @app.get("/radio")
 def get_song_radio(song_id: str):
     try:
@@ -113,25 +122,5 @@ def get_song_radio(song_id: str):
                 formatted.append(formatted_item)
                 
         return {"status": "success", "results": formatted}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-        items = songs_data.values() if isinstance(songs_data, dict) else songs_data
-        
-        for item in items:
-            if isinstance(item, dict):
-                more_info = item.get("more_info", {})
-                enc_url = more_info.get("encrypted_media_url")
-                playable_url = decrypt_url(enc_url)
-                
-                if playable_url:
-                    formatted_songs.append({
-                        "id": item.get("id"),
-                        "title": item.get("title") or item.get("song"),
-                        "artist": more_info.get("singers") or item.get("subtitle"),
-                        "image": (item.get("image") or "").replace("150x150", "500x500"),
-                        "stream_url": playable_url
-                    })
-                    
-        return {"status": "success", "results": formatted_songs}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

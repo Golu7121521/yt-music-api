@@ -6,6 +6,7 @@ from pyDes import des, ECB, PAD_PKCS5
 
 app = FastAPI(title="JioSaavn Full Featured API")
 
+# CORS setup taaki frontend (HTML) se requests block na hon
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -14,6 +15,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# URL Decryption logic for JioSaavn
 def decrypt_url(encrypted_url):
     if not encrypted_url:
         return ""
@@ -66,11 +68,11 @@ def search_songs(query: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# 2. Home Tab Feed (Trending, New Releases, Playlists)
+# 2. Home Tab Feed (Updated with correct getLaunchData endpoint)
 @app.get("/home-feed")
 def get_home_feed():
     try:
-        url = "https://www.jiosaavn.com/api.php?__call=webapi.get&token=home&type=playlist&_format=json&_marker=0&api_version=4"
+        url = "https://www.jiosaavn.com/api.php?__call=webapi.getLaunchData&api_version=4&_format=json&_marker=0"
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers)
         data = response.json()

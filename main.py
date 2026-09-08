@@ -1,8 +1,19 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from ytmusicapi import YTMusic
 import yt_dlp
 
 app = FastAPI(title="YT Music Custom API")
+
+# Add CORS Middleware to allow requests from the browser
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all methods
+    allow_headers=["*"],  # Allow all headers
+)
+
 ytmusic = YTMusic()
 
 @app.get("/")
@@ -66,4 +77,3 @@ def get_home():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-

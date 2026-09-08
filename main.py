@@ -4,8 +4,9 @@ import requests
 import base64
 from pyDes import des, ECB, PAD_PKCS5
 
-app = FastAPI(title="JioSaavn Full API")
+app = FastAPI(title="JioSaavn Context Radio API")
 
+# Enable CORS for all origins to allow browser requests
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -23,9 +24,11 @@ def decrypt_url(encrypted_url):
         k = des(secret_key, ECB, iv, pad=None, padmode=PAD_PKCS5)
         decrypted_url = k.decrypt(base64.b64decode(encrypted_url)).decode('utf-8')
         
+        # Ensure secure HTTPS protocol
         if decrypted_url.startswith("http://"):
             decrypted_url = decrypted_url.replace("http://", "https://", 1)
             
+        # Standard reliable quality (160kbps/mp4)
         if "_96.mp4" in decrypted_url:
             decrypted_url = decrypted_url.replace("_96.mp4", "_160.mp4")
             
@@ -55,13 +58,13 @@ def format_song_item(item):
 
 @app.get("/")
 def home():
-    return {"message": "JioSaavn API is running smoothly!"}
+    return {"message": "Context Radio API is live"}
 
-# 1. Search Songs
+# 1. Search Songs with Pagination
 @app.get("/search")
 def search_songs(query: str, page: int = 1):
     try:
-        url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&q={query}&_format=json&_marker=0&api_version=4&p={page}&n=20"
+        url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&q={query}&_format=json&_marker=0&api_version=4&p={page}&n=25"
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers)
         data = response.json()
@@ -72,15 +75,15 @@ def search_songs(query: str, page: int = 1):
         
         formatted = []
         for s in songs:
-            formatted_item = format_song_item(s)
-            if formatted_item:
-                formatted.append(formatted_item)
+            item = format_song_item(s)
+            if item:
+                formatted.append(item)
             
         return {"status": "success", "results": formatted}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# 2. Home Feed
+# 2. Home Tab Feed
 @app.get("/home-feed")
 def get_home_feed():
     try:
@@ -91,7 +94,7 @@ def get_home_feed():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# 3. Lyrics
+# 3. Lyrics Endpoint
 @app.get("/lyrics")
 def get_lyrics(song_id: str):
     try:
@@ -103,14 +106,27 @@ def get_lyrics(song_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# 4. Bulletproof Auto-Play Radio (Recommendations + Artist Fallback)
+# 4. Vibe-Locked Continuous Radio (Keeps the same era/category)
 @app.get("/radio")
-def get_song_radio(song_id: str, artist: str = ""):
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        formatted = []
-        
-        # Method 1: JioSaavn Recommendations
+def get_same_vibe_radio(song_id: str, vibe_query: str = "", page: int = 1):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    formatted = []
+    
+    # Priority 1: Agar vibe_query (jaise '90s songs') mila hai, usi category ke agle batch se songs fetch karo
+    if vibe_query:
+        try:
+            url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&q={vibe_query}&_format=json&_marker=0&api_version=4&p={page}&n=25"
+            res = requests.get(url, headers=headers)
+            songs = res.json().get("results", [])
+            for s in songs:
+                item = format_song_item(s)
+                if item:
+                    formatted.append(item)
+        except Exception:
+            pass
+
+    # Priority 2: Song specific recommendations fallback
+    if len(formatted) < 5:
         try:
             url = f"https://www.jiosaavn.com/api.php?__call=reco.getreco&api_version=4&_format=json&_marker=0&pid={song_id}"
             res = requests.get(url, headers=headers)
@@ -118,23 +134,9 @@ def get_song_radio(song_id: str, artist: str = ""):
             raw_songs = data if isinstance(data, list) else data.get("songs", [])
             for s in raw_songs:
                 item = format_song_item(s)
-                if item:
+                if item and not any(f["id"] == item["id"] for f in formatted):
                     formatted.append(item)
         except Exception:
             pass
 
-        # Method 2: Agar recommendations khali aayi, toh Artist ke songs se queue bharo
-        if len(formatted) < 5 and artist:
-            primary_artist = artist.split(",")[0].split("/")[0].strip()
-            artist_search_url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&q={primary_artist}&_format=json&_marker=0&api_version=4&n=20"
-            res = requests.get(artist_search_url, headers=headers)
-            data = res.json()
-            songs = data.get("results", []) if isinstance(data, dict) else []
-            for s in songs:
-                item = format_song_item(s)
-                if item and not any(f["id"] == item["id"] for f in formatted):
-                    formatted.append(item)
-
-        return {"status": "success", "results": formatted}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return {"status": "success", "results": formatted}

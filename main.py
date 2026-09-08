@@ -4,7 +4,7 @@ import requests
 import base64
 from pyDes import des, ECB, PAD_PKCS5
 
-app = FastAPI(title="JioSaavn Light API")
+app = FastAPI(title="JioSaavn Full Featured API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -21,7 +21,6 @@ def decrypt_url(encrypted_url):
         secret_key = b"38346591"
         iv = b""
         k = des(secret_key, ECB, iv, pad=None, padmode=PAD_PKCS5)
-        
         decrypted_url = k.decrypt(base64.b64decode(encrypted_url)).decode('utf-8')
         decrypted_url = decrypted_url.replace("_96.mp4", "_320.mp4")
         return decrypted_url
@@ -30,14 +29,14 @@ def decrypt_url(encrypted_url):
 
 @app.get("/")
 def home():
-    return {"message": "JioSaavn API is live and running smoothly!"}
+    return {"message": "JioSaavn Full API is live and running!"}
 
+# 1. Search Songs
 @app.get("/search")
 def search_songs(query: str):
     try:
         url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&q={query}&_format=json&_marker=0&api_version=4&n=10"
         headers = {"User-Agent": "Mozilla/5.0"}
-        
         response = requests.get(url, headers=headers)
         data = response.json()
         
@@ -51,7 +50,6 @@ def search_songs(query: str):
         for song in songs:
             more_info = song.get("more_info", {})
             enc_url = more_info.get("encrypted_media_url")
-            
             playable_url = decrypt_url(enc_url)
             
             formatted_songs.append({
@@ -65,5 +63,33 @@ def search_songs(query: str):
             })
             
         return {"status": "success", "results": formatted_songs}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# 2. Home Tab Feed (Trending, New Releases, Charts, etc.)
+@app.get("/home-feed")
+def get_home_feed():
+    try:
+        # JioSaavn Home webapi endpoint
+        url = "https://www.jiosaavn.com/api.php?__call=webapi.get&token=home&type=playlist&_format=json&_marker=0&api_version=4"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers)
+        data = response.json()
+        
+        return {"status": "success", "data": data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# 3. Get Lyrics by Song ID
+@app.get("/lyrics")
+def get_lyrics(song_id: str):
+    try:
+        url = f"https://www.jiosaavn.com/api.php?__call=lyrics.getLyrics&lyrics_id={song_id}&_format=json&_marker=0&api_version=4"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers)
+        data = response.json()
+        
+        lyrics_text = data.get("lyrics", "Lyrics not available.")
+        return {"status": "success", "lyrics": lyrics_text}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

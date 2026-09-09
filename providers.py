@@ -2,14 +2,15 @@
 providers.py
 
 Defines the CatalogProvider abstraction and provides:
-1. RealCatalogProvider: Backed by live high-bitrate streaming endpoints
-   with server-side 3DES decryption for ready-to-play HTTPS streams.
+1. RealCatalogProvider: Backed by live streaming endpoints with server-side 
+   3DES decryption, robust HTML unescaping, and complete metadata extraction.
 2. MockCatalogProvider: Fallback in-memory provider.
 """
 
 from __future__ import annotations
 
 import base64
+import html
 import requests
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
@@ -38,11 +39,20 @@ def decrypt_url(encrypted_url: str) -> str:
         return ""
 
 
+def clean_text(val: Any, default: str = "") -> str:
+    """Sanitize and unescape HTML entities like &quot;, &amp;, etc."""
+    if not val:
+        return default
+    text = str(val).strip()
+    return html.unescape(text) if text else default
+
+
 def format_saavn_track(item: dict) -> Optional[Dict[str, Any]]:
     if not isinstance(item, dict):
         return None
+
     more = item.get("more_info", {})
-    enc_url = more.get("encrypted_media_url")
+    enc_url = more.get("encrypted_media_url") or item.get("encrypted_media_url")
     stream = decrypt_url(enc_url)
     if not stream:
         return None
@@ -61,18 +71,50 @@ def format_saavn_track(item: dict) -> Optional[Dict[str, Any]]:
 
     image_url = (item.get("image") or "").replace("50x50", "500x500").replace("150x150", "500x500")
 
+    # Clean Titles
+    raw_title = item.get("title") or item.get("song") or "Unknown Title"
+    clean_title = clean_text(raw_title, "Unknown Title")
+
+    # Extract Artist Name
+    artist_raw = (
+        more.get("singers")
+        or item.get("primary_artists")
+        or more.get("primary_artists")
+        or more.get("music")
+        or item.get("subtitle")
+        or "Various Artists"
+    )
+    clean_artist = clean_text(artist_raw, "Various Artists")
+
+    # Extract Album Name
+    album_raw = more.get("album") or item.get("album") or ""
+    clean_album = clean_text(album_raw, "")
+
+    # Extract clean IDs (take the primary ID if comma-separated)
+    artist_id_raw = (
+        more.get("primary_artists_id")
+        or more.get("artist_id")
+        or item.get("primary_artists_id")
+        or item.get("artist_id")
+        or ""
+    )
+    artist_id = str(artist_id_raw).split(",")[0].strip() if artist_id_raw else ""
+
+    album_id_raw = more.get("album_id") or item.get("album_id") or ""
+    album_id = str(album_id_raw).strip() if album_id_raw else ""
+
     return {
         "id": str(item.get("id")),
-        "title": item.get("title") or item.get("song") or "Unknown Title",
-        "artist": more.get("singers") or item.get("primary_artists") or item.get("subtitle") or "Unknown Artist",
-        "album": more.get("album") or "",
+        "title": clean_title,
+        "artist": clean_artist,
+        "album": clean_album,
         "year": year,
         "language": (item.get("language") or more.get("language") or "hindi").strip().lower(),
         "image": image_url,
         "stream_url": stream,
         "duration": duration,
-        "album_id": str(more.get("album_id") or ""),
-        "artist_id": str(more.get("primary_artists_id") or ""),
+        "album_id": album_id,
+        "artist_id": artist_id,
     }
 
 
@@ -106,17 +148,23 @@ class CatalogProvider(ABC):
         ...
 
     @abstractmethod
+    async def get_playlist(self, playlist_id: str) -> Optional[Dict[str, Any]]:
+        ...
+
+    @abstractmethod
     async def get_candidate_pool(self, queries: List[str]) -> List[Dict[str, Any]]:
         ...
 
 
 # ---------------------------------------------------------------------------
-# Production Provider (Live Streaming & Decryption)
+# Production Real Provider (Live Streaming & Sanitization)
 # ---------------------------------------------------------------------------
 
 class RealCatalogProvider(CatalogProvider):
     def __init__(self) -> None:
-        self._headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        self._headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
 
     async def search_songs(self, query: str, page: int = 1, page_size: int = 20) -> List[Dict[str, Any]]:
         url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&q={query}&_format=json&_marker=0&api_version=4&p={page}&n={page_size}"
@@ -142,20 +190,23 @@ class RealCatalogProvider(CatalogProvider):
             res = requests.get(url, headers=self._headers, timeout=10).json()
 
             for alb in res.get("albums", {}).get("data", []):
+                raw_title = alb.get("title") or "Unknown Album"
+                raw_artist = alb.get("music") or "Unknown Artist"
                 albums.append({
                     "id": str(alb.get("id")),
-                    "title": alb.get("title") or "Unknown Album",
-                    "artist": alb.get("music") or "Unknown Artist",
+                    "title": clean_text(raw_title, "Unknown Album"),
+                    "artist": clean_text(raw_artist, "Unknown Artist"),
                     "image": (alb.get("image") or "").replace("50x50", "500x500").replace("150x150", "500x500"),
                     "year": int(alb.get("year")) if str(alb.get("year", "")).isdigit() else None,
                 })
 
             for art in res.get("artists", {}).get("data", []):
+                raw_name = art.get("name") or art.get("title") or "Unknown Artist"
                 artists.append({
                     "id": str(art.get("id")),
-                    "name": art.get("name") or art.get("title") or "Unknown Artist",
+                    "name": clean_text(raw_name, "Unknown Artist"),
                     "image": (art.get("image") or "").replace("50x50", "500x500").replace("150x150", "500x500"),
-                    "role": art.get("role", "Artist"),
+                    "role": clean_text(art.get("role"), "Artist"),
                     "followers": 0,
                 })
         except Exception:
@@ -186,28 +237,31 @@ class RealCatalogProvider(CatalogProvider):
 
             top_playlists = []
             for pl in res.get("top_playlists", []):
+                raw_title = pl.get("title") or pl.get("listname") or "Featured Playlist"
                 top_playlists.append({
                     "id": str(pl.get("id")),
-                    "title": pl.get("title") or pl.get("listname") or "Featured Playlist",
+                    "title": clean_text(raw_title, "Featured Playlist"),
                     "image": (pl.get("image") or "").replace("150x150", "500x500"),
                     "songCount": int(pl.get("count", 20)) if str(pl.get("count", "")).isdigit() else 20,
                 })
 
             new_albums = []
             for alb in res.get("new_albums", []):
+                raw_title = alb.get("title") or alb.get("name") or "New Album"
+                raw_artist = alb.get("subtitle") or alb.get("artist") or "Various Artists"
                 new_albums.append({
                     "id": str(alb.get("id")),
-                    "title": alb.get("title") or alb.get("name") or "New Album",
-                    "artist": alb.get("subtitle") or alb.get("artist") or "Various Artists",
+                    "title": clean_text(raw_title, "New Album"),
+                    "artist": clean_text(raw_artist, "Various Artists"),
                     "image": (alb.get("image") or "").replace("150x150", "500x500"),
                     "year": int(alb.get("year")) if str(alb.get("year", "")).isdigit() else None,
                 })
 
-            # If live endpoint returns sparse data, fallback to search seed
+            # Robust Fallback in case launch API is sparse
             if not new_trending:
-                new_trending = await self.search_songs("trending bollywood", page=1, page_size=10)
+                new_trending = await self.search_songs("latest hits", page=1, page_size=10)
             if not charts:
-                charts = await self.search_songs("top hindi hits", page=1, page_size=10)
+                charts = await self.search_songs("top hindi charts", page=1, page_size=10)
 
             return {
                 "new_trending": new_trending,
@@ -228,13 +282,16 @@ class RealCatalogProvider(CatalogProvider):
             songs_list = data.get("list", []) or data.get("songs", [])
             tracks = [format_saavn_track(s) for s in songs_list if format_saavn_track(s)]
 
+            raw_title = data.get("title") or data.get("name") or "Unknown Album"
+            raw_artist = data.get("primary_artists") or data.get("artist") or "Various Artists"
+
             return {
                 "id": str(data.get("id")),
-                "title": data.get("title") or data.get("name") or "Unknown Album",
-                "artist": data.get("primary_artists") or data.get("artist") or "Unknown Artist",
+                "title": clean_text(raw_title, "Unknown Album"),
+                "artist": clean_text(raw_artist, "Various Artists"),
                 "image": (data.get("image") or "").replace("150x150", "500x500"),
                 "year": int(data.get("year")) if str(data.get("year", "")).isdigit() else None,
-                "description": data.get("header_desc") or "",
+                "description": clean_text(data.get("header_desc"), ""),
                 "tracks": tracks,
                 "songCount": len(tracks),
             }
@@ -249,17 +306,22 @@ class RealCatalogProvider(CatalogProvider):
                 return None
 
             top_songs = [format_saavn_track(s) for s in (data.get("topSongs", []) or data.get("songs", [])) if format_saavn_track(s)]
-            top_albums = [{
-                "id": str(alb.get("id")),
-                "title": alb.get("title") or alb.get("name") or "Album",
-                "artist": data.get("name") or "Artist",
-                "year": int(alb.get("year")) if str(alb.get("year", "")).isdigit() else None,
-                "image": (alb.get("image") or "").replace("150x150", "500x500"),
-            } for alb in data.get("topAlbums", [])]
+            top_albums = []
+            for alb in data.get("topAlbums", []):
+                raw_title = alb.get("title") or alb.get("name") or "Album"
+                raw_artist = data.get("name") or "Artist"
+                top_albums.append({
+                    "id": str(alb.get("id")),
+                    "title": clean_text(raw_title, "Album"),
+                    "artist": clean_text(raw_artist, "Artist"),
+                    "year": int(alb.get("year")) if str(alb.get("year", "")).isdigit() else None,
+                    "image": (alb.get("image") or "").replace("150x150", "500x500"),
+                })
 
+            raw_name = data.get("name") or "Unknown Artist"
             return {
                 "id": str(data.get("artistId")),
-                "name": data.get("name") or "Unknown Artist",
+                "name": clean_text(raw_name, "Unknown Artist"),
                 "image": (data.get("image") or "").replace("150x150", "500x500"),
                 "role": "Lead Artist",
                 "followers": int(data.get("follower_count", 0)) if str(data.get("follower_count", "")).isdigit() else 0,
@@ -269,11 +331,34 @@ class RealCatalogProvider(CatalogProvider):
         except Exception:
             return None
 
+    async def get_playlist(self, playlist_id: str) -> Optional[Dict[str, Any]]:
+        try:
+            url = f"https://www.jiosaavn.com/api.php?__call=playlist.getDetails&listid={playlist_id}&_format=json&_marker=0&api_version=4"
+            data = requests.get(url, headers=self._headers, timeout=10).json()
+            if not data or not data.get("id"):
+                return None
+
+            songs_list = data.get("list", []) or data.get("songs", [])
+            tracks = [format_saavn_track(s) for s in songs_list if format_saavn_track(s)]
+
+            raw_title = data.get("title") or data.get("listname") or "Playlist"
+            return {
+                "id": str(data.get("id")),
+                "title": clean_text(raw_title, "Playlist"),
+                "image": (data.get("image") or "").replace("150x150", "500x500"),
+                "description": clean_text(data.get("header_desc"), ""),
+                "tracks": tracks,
+                "songCount": len(tracks),
+            }
+        except Exception:
+            return None
+
     async def get_lyrics(self, song_id: str) -> Optional[str]:
         try:
             url = f"https://www.jiosaavn.com/api.php?__call=lyrics.getLyrics&lyrics_id={song_id}&_format=json&_marker=0&api_version=4"
             data = requests.get(url, headers=self._headers, timeout=10).json()
-            return data.get("lyrics")
+            raw_lyrics = data.get("lyrics")
+            return clean_text(raw_lyrics) if raw_lyrics else None
         except Exception:
             return None
 
@@ -333,6 +418,9 @@ class MockCatalogProvider(CatalogProvider):
         albums = [a for a in self._albums if a.get("artist_id") == artist_id]
         return {**art, "top_songs": top_songs, "albums": albums}
 
+    async def get_playlist(self, playlist_id: str) -> Optional[Dict[str, Any]]:
+        return None
+
     async def get_lyrics(self, song_id: str) -> Optional[str]:
         return self._lyrics.get(song_id)
 
@@ -342,7 +430,7 @@ class MockCatalogProvider(CatalogProvider):
 
 
 # ---------------------------------------------------------------------------
-# Factory Hook (Switching directly to RealCatalogProvider)
+# Factory Hook
 # ---------------------------------------------------------------------------
 
 def get_catalog_provider() -> CatalogProvider:

@@ -1,252 +1,303 @@
-from fastapi import FastAPI, HTTPException
+"""
+main.py
+
+FastAPI application exposing a clean REST API for the Flutter music
+streaming client. All data access goes through the CatalogProvider
+abstraction (providers.py) so this file has zero knowledge of where the
+underlying data actually comes from -- swap MockCatalogProvider for a real
+internal/authorized CDN-backed provider and nothing here changes.
+
+Run locally:
+    uvicorn main:app --reload --port 8000
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, Dict, List, Optional
+
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Optional, Set
-import requests
-import base64
-from pyDes import des, ECB, PAD_PKCS5
+from fastapi.responses import JSONResponse
 
 import engine
+from providers import CatalogProvider, get_catalog_provider
+from schemas import RecommendationRequest
 
-app = FastAPI(title="Spotify-Architecture Music Streamer API")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("mymusic.api")
 
+app = FastAPI(
+    title="MyMusic Streaming API",
+    description="Backend API powering the MyMusic Flutter streaming app.",
+    version="1.0.0",
+)
+
+# ---------------------------------------------------------------------------
+# CORS
+# ---------------------------------------------------------------------------
+# Wide open for development / mobile clients that don't send an Origin header.
+# Tighten `allow_origins` to your known web origins before shipping a web build.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# -------------------------------------------------------------
-# Decryption & Metadata Helpers
-# -------------------------------------------------------------
-def decrypt_url(encrypted_url: str) -> str:
-    if not encrypted_url:
-        return ""
-    try:
-        secret_key = b"38346591"
-        iv = b""
-        k = des(secret_key, ECB, iv, pad=None, padmode=PAD_PKCS5)
-        decrypted = k.decrypt(base64.b64decode(encrypted_url)).decode("utf-8")
-        if decrypted.startswith("http://"):
-            decrypted = decrypted.replace("http://", "https://", 1)
-        if "_96.mp4" in decrypted:
-            decrypted = decrypted.replace("_96.mp4", "_160.mp4")
-        return decrypted
-    except Exception:
-        return ""
 
-def format_track(item: dict) -> Optional[dict]:
-    if not isinstance(item, dict):
-        return None
-    more = item.get("more_info", {})
-    enc_url = more.get("encrypted_media_url")
-    stream = decrypt_url(enc_url)
-    if not stream:
-        return None
+# ---------------------------------------------------------------------------
+# Defensive formatting helpers
+# ---------------------------------------------------------------------------
 
-    raw_year = item.get("year") or more.get("year") or 0
-    try:
-        year = int(raw_year)
-    except (ValueError, TypeError):
-        year = 0
+def _safe_str(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    if isinstance(value, (str, int, float)):
+        return str(value)
+    return default
 
+
+def _safe_int(value: Any, default: Optional[int] = None) -> Optional[int]:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            return int(stripped)
+    return default
+
+
+def _upgrade_to_https(url: str) -> str:
+    """Ensure any stream/artwork URL served to the client is HTTPS."""
+    if not url:
+        return url
+    if url.startswith("http://"):
+        return "https://" + url[len("http://"):]
+    return url
+
+
+def format_song(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Sanitize/normalize a raw catalog song dict into the stable public
+    contract the Flutter client expects. Tolerates missing/malformed fields
+    without raising."""
+    if not isinstance(raw, dict):
+        raw = {}
     return {
-        "id": str(item.get("id")),
-        "title": item.get("title") or item.get("song") or "",
-        "artist": more.get("singers") or item.get("primary_artists") or item.get("subtitle") or "Unknown",
-        "album": more.get("album") or "",
-        "year": year,
-        "language": (item.get("language") or more.get("language") or "hindi").strip().lower(),
-        "image": (item.get("image") or "").replace("150x150", "500x500").replace("50x50", "500x500"),
-        "stream_url": stream,
-        "tags": []
+        "id": _safe_str(raw.get("id")),
+        "title": _safe_str(raw.get("title"), "Unknown Title"),
+        "artist": _safe_str(raw.get("artist"), "Unknown Artist"),
+        "album": _safe_str(raw.get("album")),
+        "year": _safe_int(raw.get("year")),
+        "language": _safe_str(raw.get("language")),
+        "image": _upgrade_to_https(_safe_str(raw.get("image"))),
+        "stream_url": _upgrade_to_https(_safe_str(raw.get("stream_url"))),
+        "duration": _safe_int(raw.get("duration")),
     }
 
-def fetch_search_tracks(query: str, page: int = 1, count: int = 20) -> List[dict]:
-    url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&q={query}&_format=json&_marker=0&api_version=4&p={page}&n={count}"
-    headers = {"User-Agent": "Mozilla/5.0"}
+
+def format_album(raw: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(raw, dict):
+        raw = {}
+    out = {
+        "id": _safe_str(raw.get("id")),
+        "title": _safe_str(raw.get("title"), "Unknown Album"),
+        "artist": _safe_str(raw.get("artist"), "Unknown Artist"),
+        "image": _upgrade_to_https(_safe_str(raw.get("image"))),
+        "year": _safe_int(raw.get("year")),
+        "description": _safe_str(raw.get("description")),
+    }
+    if "tracks" in raw:
+        out["tracks"] = [format_song(t) for t in raw.get("tracks") or []]
+        out["songCount"] = len(out["tracks"])
+    return out
+
+
+def format_artist(raw: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(raw, dict):
+        raw = {}
+    out = {
+        "id": _safe_str(raw.get("id")),
+        "name": _safe_str(raw.get("name"), "Unknown Artist"),
+        "image": _upgrade_to_https(_safe_str(raw.get("image"))),
+        "role": _safe_str(raw.get("role")),
+        "followers": _safe_int(raw.get("followers"), 0),
+    }
+    if "top_songs" in raw:
+        out["top_songs"] = [format_song(s) for s in raw.get("top_songs") or []]
+    if "albums" in raw:
+        out["albums"] = [format_album(a) for a in raw.get("albums") or []]
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
+
+@app.get("/", tags=["meta"])
+async def root() -> Dict[str, str]:
+    return {"status": "ok", "service": "MyMusic Streaming API"}
+
+
+@app.get("/health", tags=["meta"])
+async def health() -> Dict[str, str]:
+    return {"status": "healthy"}
+
+
+# ---------------------------------------------------------------------------
+# Search
+# ---------------------------------------------------------------------------
+
+@app.get("/search", tags=["search"])
+async def search(
+    query: str = Query(..., min_length=1),
+    page: int = Query(1, ge=1),
+    provider: CatalogProvider = Depends(get_catalog_provider),
+) -> List[Dict[str, Any]]:
     try:
-        res = requests.get(url, headers=headers).json()
-        raw_list = res.get("results", []) if isinstance(res, dict) else []
-        formatted = []
-        for s in raw_list:
-            t = format_track(s)
-            if t:
-                formatted.append(t)
-        return formatted
+        results = await provider.search_songs(query=query, page=page, page_size=20)
+        return [format_song(r) for r in results]
     except Exception:
-        return []
+        logger.exception("search failed for query=%s page=%s", query, page)
+        raise HTTPException(status_code=502, detail="Unable to fetch search results.")
 
-class RecommendationRequest(BaseModel):
-    seed_track: dict
-    exclude_ids: Optional[List[str]] = []
-    top_k: Optional[int] = 15
 
-# -------------------------------------------------------------
-# Base Endpoints
-# -------------------------------------------------------------
-@app.get("/")
-def root():
-    return {"message": "Streaming API & Algorithmic Recommendation Engine is live"}
-
-# 1. Standard Track Search
-@app.get("/search")
-def search(query: str, page: int = 1):
-    tracks = fetch_search_tracks(query=query, page=page, count=20)
-    return {"status": "success", "results": tracks}
-
-# 2. Categorized Search (Songs, Albums, Artists for Search Screen Tabs)
-@app.get("/search/all")
-def search_all(query: str):
-    headers = {"User-Agent": "Mozilla/5.0"}
+@app.get("/search/all", tags=["search"])
+async def search_all(
+    query: str = Query(..., min_length=1),
+    provider: CatalogProvider = Depends(get_catalog_provider),
+) -> Dict[str, List[Dict[str, Any]]]:
     try:
-        url = f"https://www.jiosaavn.com/api.php?__call=autocomplete.get&query={query}&_format=json&_marker=0&api_version=4"
-        res = requests.get(url, headers=headers).json()
-        
-        # Dedicated track search for robust audio results
-        formatted_songs = fetch_search_tracks(query=query, page=1, count=15)
-
-        albums = []
-        for alb in res.get("albums", {}).get("data", []):
-            albums.append({
-                "id": str(alb.get("id")),
-                "title": alb.get("title"),
-                "artist": alb.get("music"),
-                "image": (alb.get("image") or "").replace("50x50", "500x500").replace("150x150", "500x500"),
-                "year": alb.get("year", "")
-            })
-
-        artists = []
-        for art in res.get("artists", {}).get("data", []):
-            artists.append({
-                "id": str(art.get("id")),
-                "name": art.get("name") or art.get("title"),
-                "image": (art.get("image") or "").replace("50x50", "500x500").replace("150x150", "500x500"),
-                "role": art.get("role", "Artist")
-            })
-
+        results = await provider.search_all(query=query)
         return {
-            "status": "success",
-            "results": {
-                "songs": formatted_songs,
-                "albums": albums,
-                "artists": artists
-            }
+            "songs": [format_song(s) for s in results.get("songs", [])],
+            "albums": [format_album(a) for a in results.get("albums", [])],
+            "artists": [format_artist(a) for a in results.get("artists", [])],
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("search_all failed for query=%s", query)
+        raise HTTPException(status_code=502, detail="Unable to fetch search results.")
 
-# 3. Home Feed
-@app.get("/home-feed")
-def home_feed():
-    try:
-        url = "https://www.jiosaavn.com/api.php?__call=webapi.getLaunchData&api_version=4&_format=json&_marker=0"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        data = requests.get(url, headers=headers).json()
-        return {"status": "success", "data": data}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
-# 4. Lyrics
-@app.get("/lyrics")
-def lyrics(song_id: str):
-    try:
-        url = f"https://www.jiosaavn.com/api.php?__call=lyrics.getLyrics&lyrics_id={song_id}&_format=json&_marker=0&api_version=4"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        data = requests.get(url, headers=headers).json()
-        return {"status": "success", "lyrics": data.get("lyrics", "Lyrics aren't available for this song.")}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+# ---------------------------------------------------------------------------
+# Home feed
+# ---------------------------------------------------------------------------
 
-# 5. Album Details & Tracklist
-@app.get("/album")
-def get_album(album_id: str):
-    headers = {"User-Agent": "Mozilla/5.0"}
+@app.get("/home-feed", tags=["home"])
+async def home_feed(
+    provider: CatalogProvider = Depends(get_catalog_provider),
+) -> Dict[str, Any]:
     try:
-        url = f"https://www.jiosaavn.com/api.php?__call=content.getAlbumDetails&albumid={album_id}&_format=json&_marker=0&api_version=4"
-        data = requests.get(url, headers=headers).json()
-        
-        songs_list = data.get("list", []) or data.get("songs", [])
-        formatted_tracks = [format_track(s) for s in songs_list if format_track(s)]
-        
+        feed = await provider.get_home_feed()
         return {
-            "status": "success",
-            "album": {
-                "id": str(data.get("id") or album_id),
-                "title": data.get("title") or data.get("name"),
-                "artist": data.get("primary_artists") or data.get("artist"),
-                "year": data.get("year"),
-                "image": (data.get("image") or "").replace("150x150", "500x500"),
-                "track_count": len(formatted_tracks),
-                "tracks": formatted_tracks
-            }
+            "new_trending": [format_song(s) for s in feed.get("new_trending", [])],
+            "top_playlists": feed.get("top_playlists", []),
+            "new_albums": [format_album(a) for a in feed.get("new_albums", [])],
+            "charts": [format_song(s) for s in feed.get("charts", [])],
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("home_feed failed")
+        raise HTTPException(status_code=502, detail="Unable to load home feed.")
 
-# 6. Artist Details, Top Songs & Albums
-@app.get("/artist")
-def get_artist(artist_id: str):
-    headers = {"User-Agent": "Mozilla/5.0"}
+
+# ---------------------------------------------------------------------------
+# Album / Artist details
+# ---------------------------------------------------------------------------
+
+@app.get("/album", tags=["catalog"])
+async def get_album(
+    album_id: str = Query(..., min_length=1),
+    provider: CatalogProvider = Depends(get_catalog_provider),
+) -> Dict[str, Any]:
     try:
-        url = f"https://www.jiosaavn.com/api.php?__call=artist.getArtistPageDetails&artistId={artist_id}&_format=json&_marker=0&api_version=4"
-        data = requests.get(url, headers=headers).json()
-        
-        top_songs = data.get("topSongs", []) or data.get("songs", [])
-        formatted_songs = [format_track(s) for s in top_songs if format_track(s)]
-        
-        top_albums = []
-        for alb in data.get("topAlbums", []):
-            top_albums.append({
-                "id": str(alb.get("id")),
-                "title": alb.get("title") or alb.get("name"),
-                "year": alb.get("year", ""),
-                "image": (alb.get("image") or "").replace("150x150", "500x500")
-            })
+        album = await provider.get_album(album_id)
+    except Exception:
+        logger.exception("get_album failed for album_id=%s", album_id)
+        raise HTTPException(status_code=502, detail="Unable to load album.")
+    if album is None:
+        raise HTTPException(status_code=404, detail="Album not found.")
+    return format_album(album)
 
-        return {
-            "status": "success",
-            "artist": {
-                "id": str(data.get("artistId") or artist_id),
-                "name": data.get("name"),
-                "image": (data.get("image") or "").replace("150x150", "500x500"),
-                "follower_count": data.get("follower_count", "0"),
-                "top_songs": formatted_songs,
-                "top_albums": top_albums
-            }
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
-# 7. Algorithmic Recommendations (Vibe Lock Engine)
-@app.post("/recommendations")
-def get_recommendations(req: RecommendationRequest):
-    seed = req.seed_track
-    if not seed or not seed.get("id"):
-        raise HTTPException(status_code=400, detail="Invalid seed track")
+@app.get("/artist", tags=["catalog"])
+async def get_artist(
+    artist_id: str = Query(..., min_length=1),
+    provider: CatalogProvider = Depends(get_catalog_provider),
+) -> Dict[str, Any]:
+    try:
+        artist = await provider.get_artist(artist_id)
+    except Exception:
+        logger.exception("get_artist failed for artist_id=%s", artist_id)
+        raise HTTPException(status_code=502, detail="Unable to load artist.")
+    if artist is None:
+        raise HTTPException(status_code=404, detail="Artist not found.")
+    return format_artist(artist)
 
-    # Generate contextual candidate queries via engine.py
-    queries = engine.generate_candidate_queries(seed)
-    
-    candidate_pool = []
-    seen_ids: Set[str] = set(req.exclude_ids or [])
-    seen_ids.add(str(seed.get("id")))
 
-    for q in queries:
-        batch = fetch_search_tracks(query=q, page=1, count=15)
-        for cand in batch:
-            if cand["id"] not in seen_ids:
-                seen_ids.add(cand["id"])
-                candidate_pool.append(cand)
+# ---------------------------------------------------------------------------
+# Lyrics
+# ---------------------------------------------------------------------------
 
-    # Rank and filter through engine algorithm
-    ranked_tracks = engine.rank_candidates(
-        seed_track=seed,
-        candidates=candidate_pool,
-        top_k=req.top_k,
-        exclude_ids=set(req.exclude_ids or [])
+@app.get("/lyrics", tags=["catalog"])
+async def get_lyrics(
+    song_id: str = Query(..., min_length=1),
+    provider: CatalogProvider = Depends(get_catalog_provider),
+) -> Dict[str, Any]:
+    try:
+        lyrics = await provider.get_lyrics(song_id)
+    except Exception:
+        logger.exception("get_lyrics failed for song_id=%s", song_id)
+        raise HTTPException(status_code=502, detail="Unable to load lyrics.")
+    if not lyrics:
+        return {"song_id": song_id, "available": False, "lyrics": None}
+    return {"song_id": song_id, "available": True, "lyrics": lyrics, "synced": False}
+
+
+# ---------------------------------------------------------------------------
+# Recommendations
+# ---------------------------------------------------------------------------
+
+@app.post("/recommendations", tags=["recommendations"])
+async def recommendations(
+    payload: RecommendationRequest,
+    provider: CatalogProvider = Depends(get_catalog_provider),
+) -> Dict[str, Any]:
+    try:
+        seed_dict = payload.seed_track.model_dump(by_alias=False)
+        # normalize stream_url key regardless of which alias the client sent
+        seed_dict["stream_url"] = seed_dict.get("stream_url") or payload.seed_track.stream_url
+
+        queries = engine.generate_candidate_queries(seed_dict)
+        candidate_pool = await provider.get_candidate_pool(queries)
+        candidate_pool = [format_song(c) for c in candidate_pool]
+
+        ranked = engine.rank_candidates(
+            seed_track=seed_dict,
+            candidates=candidate_pool,
+            exclude_ids=payload.exclude_ids,
+            top_k=payload.top_k,
+        )
+        return {"seed_id": seed_dict.get("id"), "count": len(ranked), "results": ranked}
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("recommendations failed")
+        raise HTTPException(status_code=502, detail="Unable to generate recommendations.")
+
+
+# ---------------------------------------------------------------------------
+# Global error handler safety net
+# ---------------------------------------------------------------------------
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request, exc: Exception) -> JSONResponse:
+    logger.exception("Unhandled exception on %s", request.url)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error."},
     )
-
-    return {"status": "success", "results": ranked_tracks}

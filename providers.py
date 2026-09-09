@@ -3,7 +3,8 @@ providers.py
 
 Defines the CatalogProvider abstraction and provides:
 1. RealCatalogProvider: Backed by live streaming endpoints with server-side 
-   3DES decryption, robust HTML unescaping, and complete metadata extraction.
+   3DES decryption, robust HTML unescaping, complete metadata extraction,
+   smart name-to-ID artist fallback, and playlist resolution.
 2. MockCatalogProvider: Fallback in-memory provider.
 """
 
@@ -90,7 +91,7 @@ def format_saavn_track(item: dict) -> Optional[Dict[str, Any]]:
     album_raw = more.get("album") or item.get("album") or ""
     clean_album = clean_text(album_raw, "")
 
-    # Extract clean IDs (take the primary ID if comma-separated)
+    # Extract clean IDs (take primary ID if comma-separated)
     artist_id_raw = (
         more.get("primary_artists_id")
         or more.get("artist_id")
@@ -157,7 +158,7 @@ class CatalogProvider(ABC):
 
 
 # ---------------------------------------------------------------------------
-# Production Real Provider (Live Streaming & Sanitization)
+# Production Real Provider (Live Streaming & Fallbacks)
 # ---------------------------------------------------------------------------
 
 class RealCatalogProvider(CatalogProvider):
@@ -257,7 +258,6 @@ class RealCatalogProvider(CatalogProvider):
                     "year": int(alb.get("year")) if str(alb.get("year", "")).isdigit() else None,
                 })
 
-            # Robust Fallback in case launch API is sparse
             if not new_trending:
                 new_trending = await self.search_songs("latest hits", page=1, page_size=10)
             if not charts:
@@ -300,8 +300,21 @@ class RealCatalogProvider(CatalogProvider):
 
     async def get_artist(self, artist_id: str) -> Optional[Dict[str, Any]]:
         try:
+            # 1. Primary lookup using given ID
             url = f"https://www.jiosaavn.com/api.php?__call=artist.getArtistPageDetails&artistId={artist_id}&_format=json&_marker=0&api_version=4"
             data = requests.get(url, headers=self._headers, timeout=10).json()
+
+            # 2. Smart Fallback: If ID is not recognized or is a name string, resolve real ID via search
+            if not data or not data.get("artistId"):
+                search_query = artist_id.split(",")[0].strip()
+                search_url = f"https://www.jiosaavn.com/api.php?__call=autocomplete.get&query={search_query}&_format=json&_marker=0&api_version=4"
+                s_res = requests.get(search_url, headers=self._headers, timeout=10).json()
+                artist_list = s_res.get("artists", {}).get("data", [])
+                if artist_list:
+                    real_id = artist_list[0].get("id")
+                    url = f"https://www.jiosaavn.com/api.php?__call=artist.getArtistPageDetails&artistId={real_id}&_format=json&_marker=0&api_version=4"
+                    data = requests.get(url, headers=self._headers, timeout=10).json()
+
             if not data or not data.get("artistId"):
                 return None
 

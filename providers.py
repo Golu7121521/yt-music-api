@@ -2,10 +2,10 @@
 providers.py
 
 Defines the CatalogProvider abstraction and provides:
-1. RealCatalogProvider: Backed by live streaming endpoints with server-side 
-   3DES decryption, robust HTML unescaping, complete metadata extraction,
-   smart name-to-ID artist fallback, and playlist resolution.
-2. MockCatalogProvider: Fallback in-memory provider.
+1. RealCatalogProvider: Live streaming endpoints with server-side 3DES decryption,
+   HTML entity unescaping, top iconic artists feed with verified headshots,
+   smart name-to-ID fallback for artist lookups, and playlist support.
+2. MockCatalogProvider: Static in-memory fallback.
 """
 
 from __future__ import annotations
@@ -72,11 +72,9 @@ def format_saavn_track(item: dict) -> Optional[Dict[str, Any]]:
 
     image_url = (item.get("image") or "").replace("50x50", "500x500").replace("150x150", "500x500")
 
-    # Clean Titles
     raw_title = item.get("title") or item.get("song") or "Unknown Title"
     clean_title = clean_text(raw_title, "Unknown Title")
 
-    # Extract Artist Name
     artist_raw = (
         more.get("singers")
         or item.get("primary_artists")
@@ -87,11 +85,9 @@ def format_saavn_track(item: dict) -> Optional[Dict[str, Any]]:
     )
     clean_artist = clean_text(artist_raw, "Various Artists")
 
-    # Extract Album Name
     album_raw = more.get("album") or item.get("album") or ""
     clean_album = clean_text(album_raw, "")
 
-    # Extract clean IDs (take primary ID if comma-separated)
     artist_id_raw = (
         more.get("primary_artists_id")
         or more.get("artist_id")
@@ -158,7 +154,7 @@ class CatalogProvider(ABC):
 
 
 # ---------------------------------------------------------------------------
-# Production Real Provider (Live Streaming & Fallbacks)
+# Production Real Provider
 # ---------------------------------------------------------------------------
 
 class RealCatalogProvider(CatalogProvider):
@@ -258,6 +254,66 @@ class RealCatalogProvider(CatalogProvider):
                     "year": int(alb.get("year")) if str(alb.get("year", "")).isdigit() else None,
                 })
 
+            # Real Popular Artists with Verified IDs and Original Profile Photos
+            popular_artists = [
+                {
+                    "id": "459345",
+                    "name": "Arijit Singh",
+                    "image": "https://c.saavncdn.com/artists/Arijit_Singh_002_20230323062147_500x500.jpg",
+                    "role": "Artist",
+                    "followers": 0,
+                },
+                {
+                    "id": "456863",
+                    "name": "Atif Aslam",
+                    "image": "https://c.saavncdn.com/artists/Atif_Aslam_500x500.jpg",
+                    "role": "Artist",
+                    "followers": 0,
+                },
+                {
+                    "id": "455125",
+                    "name": "Kumar Sanu",
+                    "image": "https://c.saavncdn.com/artists/Kumar_Sanu_500x500.jpg",
+                    "role": "Artist",
+                    "followers": 0,
+                },
+                {
+                    "id": "455130",
+                    "name": "Alka Yagnik",
+                    "image": "https://c.saavncdn.com/artists/Alka_Yagnik_500x500.jpg",
+                    "role": "Artist",
+                    "followers": 0,
+                },
+                {
+                    "id": "455726",
+                    "name": "Shreya Ghoshal",
+                    "image": "https://c.saavncdn.com/artists/Shreya_Ghoshal_003_20230324072317_500x500.jpg",
+                    "role": "Artist",
+                    "followers": 0,
+                },
+                {
+                    "id": "881158",
+                    "name": "Aditya Rikhari",
+                    "image": "https://c.saavncdn.com/artists/Aditya_Rikhari_000_20231124110825_500x500.jpg",
+                    "role": "Artist",
+                    "followers": 0,
+                },
+                {
+                    "id": "456269",
+                    "name": "Pritam",
+                    "image": "https://c.saavncdn.com/artists/Pritam_500x500.jpg",
+                    "role": "Music Director",
+                    "followers": 0,
+                },
+                {
+                    "id": "464656",
+                    "name": "Anuv Jain",
+                    "image": "https://c.saavncdn.com/artists/Anuv_Jain_500x500.jpg",
+                    "role": "Artist",
+                    "followers": 0,
+                },
+            ]
+
             if not new_trending:
                 new_trending = await self.search_songs("latest hits", page=1, page_size=10)
             if not charts:
@@ -268,9 +324,16 @@ class RealCatalogProvider(CatalogProvider):
                 "top_playlists": top_playlists,
                 "new_albums": new_albums,
                 "charts": charts,
+                "popular_artists": popular_artists,
             }
         except Exception:
-            return {"new_trending": [], "top_playlists": [], "new_albums": [], "charts": []}
+            return {
+                "new_trending": [],
+                "top_playlists": [],
+                "new_albums": [],
+                "charts": [],
+                "popular_artists": [],
+            }
 
     async def get_album(self, album_id: str) -> Optional[Dict[str, Any]]:
         try:
@@ -300,11 +363,10 @@ class RealCatalogProvider(CatalogProvider):
 
     async def get_artist(self, artist_id: str) -> Optional[Dict[str, Any]]:
         try:
-            # 1. Primary lookup using given ID
             url = f"https://www.jiosaavn.com/api.php?__call=artist.getArtistPageDetails&artistId={artist_id}&_format=json&_marker=0&api_version=4"
             data = requests.get(url, headers=self._headers, timeout=10).json()
 
-            # 2. Smart Fallback: If ID is not recognized or is a name string, resolve real ID via search
+            # Name-to-ID fallback if not found directly
             if not data or not data.get("artistId"):
                 search_query = artist_id.split(",")[0].strip()
                 search_url = f"https://www.jiosaavn.com/api.php?__call=autocomplete.get&query={search_query}&_format=json&_marker=0&api_version=4"
@@ -385,7 +447,7 @@ class RealCatalogProvider(CatalogProvider):
 
 
 # ---------------------------------------------------------------------------
-# In-Memory Mock Provider (Retained as Fallback)
+# In-Memory Mock Provider
 # ---------------------------------------------------------------------------
 
 class MockCatalogProvider(CatalogProvider):
@@ -414,6 +476,7 @@ class MockCatalogProvider(CatalogProvider):
             "top_playlists": [{"id": "pl_1", "title": "Late Night Drive", "image": "https://picsum.photos/seed/p1/600/600", "songCount": 18}],
             "new_albums": sorted(self._albums, key=lambda a: -a["year"])[:6],
             "charts": list(reversed(self._songs))[:10],
+            "popular_artists": list(self._artists)[:8],
         }
 
     async def get_album(self, album_id: str) -> Optional[Dict[str, Any]]:

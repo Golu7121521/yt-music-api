@@ -1,9 +1,8 @@
 """
 main.py
 
-FastAPI application exposing a clean REST API for the Flutter music
-streaming client. All data access goes through the CatalogProvider
-abstraction (providers.py).
+FastAPI application exposing REST endpoints for the Flutter music streaming client.
+Decoupled through the CatalogProvider abstraction (providers.py).
 
 Run locally:
     uvicorn main:app --reload --port 8000
@@ -44,7 +43,7 @@ app.add_middleware(
 
 
 # ---------------------------------------------------------------------------
-# Defensive formatting helpers
+# Formatting Helpers
 # ---------------------------------------------------------------------------
 
 def _safe_str(value: Any, default: str = "") -> str:
@@ -70,7 +69,6 @@ def _safe_int(value: Any, default: Optional[int] = None) -> Optional[int]:
 
 
 def _upgrade_to_https(url: str) -> str:
-    """Ensure any stream/artwork URL served to the client is HTTPS."""
     if not url:
         return url
     if url.startswith("http://"):
@@ -79,8 +77,6 @@ def _upgrade_to_https(url: str) -> str:
 
 
 def format_song(raw: Dict[str, Any]) -> Dict[str, Any]:
-    """Sanitize/normalize a raw catalog song dict into the stable public
-    contract the Flutter client expects."""
     if not isinstance(raw, dict):
         raw = {}
     return {
@@ -148,7 +144,7 @@ def format_playlist(raw: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Meta / Health check
+# Meta / Health
 # ---------------------------------------------------------------------------
 
 @app.get("/", tags=["meta"])
@@ -162,7 +158,7 @@ async def health() -> Dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Search
+# Search Endpoints
 # ---------------------------------------------------------------------------
 
 @app.get("/search", tags=["search"])
@@ -197,7 +193,7 @@ async def search_all(
 
 
 # ---------------------------------------------------------------------------
-# Home feed
+# Home Feed
 # ---------------------------------------------------------------------------
 
 @app.get("/home-feed", tags=["home"])
@@ -208,9 +204,10 @@ async def home_feed(
         feed = await provider.get_home_feed()
         return {
             "new_trending": [format_song(s) for s in feed.get("new_trending", [])],
-            "top_playlists": feed.get("top_playlists", []),
+            "top_playlists": [format_playlist(p) if "tracks" in p else p for p in feed.get("top_playlists", [])],
             "new_albums": [format_album(a) for a in feed.get("new_albums", [])],
             "charts": [format_song(s) for s in feed.get("charts", [])],
+            "popular_artists": [format_artist(art) for art in feed.get("popular_artists", [])],
         }
     except Exception:
         logger.exception("home_feed failed")
@@ -218,7 +215,7 @@ async def home_feed(
 
 
 # ---------------------------------------------------------------------------
-# Album / Artist / Playlist details
+# Catalog Details
 # ---------------------------------------------------------------------------
 
 @app.get("/album", tags=["catalog"])
@@ -265,10 +262,6 @@ async def get_playlist(
         raise HTTPException(status_code=404, detail="Playlist not found.")
     return format_playlist(playlist)
 
-
-# ---------------------------------------------------------------------------
-# Lyrics
-# ---------------------------------------------------------------------------
 
 @app.get("/lyrics", tags=["catalog"])
 async def get_lyrics(
@@ -317,7 +310,7 @@ async def recommendations(
 
 
 # ---------------------------------------------------------------------------
-# Global error handler safety net
+# Error Handling
 # ---------------------------------------------------------------------------
 
 @app.exception_handler(Exception)

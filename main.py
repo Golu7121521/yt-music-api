@@ -3,9 +3,7 @@ main.py
 
 FastAPI application exposing a clean REST API for the Flutter music
 streaming client. All data access goes through the CatalogProvider
-abstraction (providers.py) so this file has zero knowledge of where the
-underlying data actually comes from -- swap MockCatalogProvider for a real
-internal/authorized CDN-backed provider and nothing here changes.
+abstraction (providers.py).
 
 Run locally:
     uvicorn main:app --reload --port 8000
@@ -36,8 +34,6 @@ app = FastAPI(
 # ---------------------------------------------------------------------------
 # CORS
 # ---------------------------------------------------------------------------
-# Wide open for development / mobile clients that don't send an Origin header.
-# Tighten `allow_origins` to your known web origins before shipping a web build.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -84,8 +80,7 @@ def _upgrade_to_https(url: str) -> str:
 
 def format_song(raw: Dict[str, Any]) -> Dict[str, Any]:
     """Sanitize/normalize a raw catalog song dict into the stable public
-    contract the Flutter client expects. Tolerates missing/malformed fields
-    without raising."""
+    contract the Flutter client expects."""
     if not isinstance(raw, dict):
         raw = {}
     return {
@@ -98,6 +93,8 @@ def format_song(raw: Dict[str, Any]) -> Dict[str, Any]:
         "image": _upgrade_to_https(_safe_str(raw.get("image"))),
         "stream_url": _upgrade_to_https(_safe_str(raw.get("stream_url"))),
         "duration": _safe_int(raw.get("duration")),
+        "artist_id": _safe_str(raw.get("artist_id")),
+        "album_id": _safe_str(raw.get("album_id")),
     }
 
 
@@ -135,8 +132,23 @@ def format_artist(raw: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def format_playlist(raw: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(raw, dict):
+        raw = {}
+    out = {
+        "id": _safe_str(raw.get("id")),
+        "title": _safe_str(raw.get("title"), "Featured Playlist"),
+        "image": _upgrade_to_https(_safe_str(raw.get("image"))),
+        "description": _safe_str(raw.get("description")),
+    }
+    if "tracks" in raw:
+        out["tracks"] = [format_song(t) for t in raw.get("tracks") or []]
+        out["songCount"] = len(out["tracks"])
+    return out
+
+
 # ---------------------------------------------------------------------------
-# Health check
+# Meta / Health check
 # ---------------------------------------------------------------------------
 
 @app.get("/", tags=["meta"])
@@ -206,7 +218,7 @@ async def home_feed(
 
 
 # ---------------------------------------------------------------------------
-# Album / Artist details
+# Album / Artist / Playlist details
 # ---------------------------------------------------------------------------
 
 @app.get("/album", tags=["catalog"])
@@ -239,6 +251,21 @@ async def get_artist(
     return format_artist(artist)
 
 
+@app.get("/playlist", tags=["catalog"])
+async def get_playlist(
+    playlist_id: str = Query(..., min_length=1),
+    provider: CatalogProvider = Depends(get_catalog_provider),
+) -> Dict[str, Any]:
+    try:
+        playlist = await provider.get_playlist(playlist_id)
+    except Exception:
+        logger.exception("get_playlist failed for playlist_id=%s", playlist_id)
+        raise HTTPException(status_code=502, detail="Unable to load playlist.")
+    if playlist is None:
+        raise HTTPException(status_code=404, detail="Playlist not found.")
+    return format_playlist(playlist)
+
+
 # ---------------------------------------------------------------------------
 # Lyrics
 # ---------------------------------------------------------------------------
@@ -269,7 +296,6 @@ async def recommendations(
 ) -> Dict[str, Any]:
     try:
         seed_dict = payload.seed_track.model_dump(by_alias=False)
-        # normalize stream_url key regardless of which alias the client sent
         seed_dict["stream_url"] = seed_dict.get("stream_url") or payload.seed_track.stream_url
 
         queries = engine.generate_candidate_queries(seed_dict)
